@@ -56,12 +56,13 @@ life_df <- read_csv("https://ftp.cdc.gov/pub/Health_Statistics/NCHS/Datasets/NVS
   mutate(indicator = "Life expectancy", topic = "Life expectancy", 
          level = factor("1_neighborhood") %>% fct_expand("2_city")) %>%
   inner_join(weights %>% distinct(city, name), by = c("tract" = "name")) %>%
-  mutate(type = "map", format = ".3g")
+  mutate(type = "map", format = ".3g", year = "2010-2015")
 
 
 # both 500 cities and life expectancy
 health <- cdc_df %>% 
-  select(tract, city, level, topic, indicator = question, value, type, format) %>%
+  select(tract, city, level, topic, indicator = question, value, type, format, year) %>%
+  mutate(year = as.character(year)) %>%
   bind_rows(life_df) %>%
   mutate(name = coalesce(tract, city))
 
@@ -72,7 +73,7 @@ health <- cdc_df %>%
 
 all_city_health <- weights %>%
   left_join(health, by = c("name", "city")) %>% 
-  group_by(city, level, topic, indicator, type, format, town, neighborhood) %>%
+  group_by(city, level, year, topic, indicator, type, format, town, neighborhood) %>%
   summarise(value = weighted.mean(value, weight, na.rm = T) %>% round(digits = 3)) %>% 
   filter(!is.na(value)) %>%
   ungroup() %>%
@@ -96,7 +97,8 @@ meta <- bind_rows(
   json[[1]] %>% rename(displayTopic = topic) %>% mutate(topic = displayTopic),
   all_city_health %>% rename(displayTopic = topic) %>% mutate(topic = str_extract(displayTopic, "\\w+$"))
 ) %>%
-  distinct(topic, displayTopic, indicator, type, format) %>%
+  replace_na(list(year = "2017")) %>%
+  distinct(topic, displayTopic, indicator, type, format, year) %>%
   rename(displayIndicator = indicator) %>%
   mutate(topic = as_factor(topic) %>%
            fct_relabel(str_to_lower) %>%
@@ -109,7 +111,7 @@ meta <- bind_rows(
            str_replace_all("\\s", "_") %>%
            str_replace("estimate", "num")) %>%
   # mutate(displayIndicator = coalesce(new_display, displayIndicator)) %>%
-  select(topic, displayTopic, indicator, displayIndicator, type, format, new_display)
+  select(topic, displayTopic, indicator, displayIndicator, type, format, new_display, year)
 
 
 wide <- json %>%
@@ -118,11 +120,12 @@ wide <- json %>%
   select(city = name, town, name = neighborhood, geoType, topic, indicator, value) %>%
   rename(displayIndicator = indicator, displayTopic = topic) %>%
   left_join(meta, by = c("displayTopic", "displayIndicator")) %>%
-  select(-matches("display"), -type, -format) %>%
+  select(-matches("display"), -type, -format, -year) %>%
   mutate_at(vars(indicator, topic), as_factor) %>%
   group_by(city, topic) %>%
   nest() %>%
-  mutate(data = map(data, ~spread(., key = indicator, value = value) %>% arrange(desc(geoType)))) %>%
+  arrange(city, topic) %>%
+  mutate(data = map(data, possibly(~spread(., key = indicator, value = value) %>% arrange(desc(geoType)), NULL, quiet = F))) %>%
   split(.$city) %>%
   map(select, -city)
 
@@ -135,3 +138,24 @@ meta %>%
   mutate_at(vars(topic, displayTopic), as_factor) %>%
   arrange(topic, displayTopic) %>%
   write_json("./to_viz/nhood_meta.json")
+
+read_delim("sources.txt", delim = ";", col_types = "cccc") %>%
+  write_json("./to_viz/sources.json")
+
+# make download version
+
+
+wide %>%
+  map(function(city_data) {
+    city_data %>%
+      mutate(data = map(data, ~select(., -town, -geoType) %>% gather(key = indicator, value = value, -name))) %>%
+      unnest() %>% 
+      select(-topic) %>%
+      distinct(name, indicator, .keep_all = T) %>%
+      left_join(meta %>% select(indicator, displayIndicator, year) %>% distinct(), by = c("indicator")) %>% 
+      select(name, displayIndicator, year, value) %>% 
+      unite("indicator", displayIndicator, year) %>%
+      mutate_at(vars(indicator, name), as_factor) %>%
+      spread(key = indicator, value = value)
+  }) %>%
+  iwalk(~write_csv(.x, str_glue("to_distribute/2017_{.y}_profile_distr.csv"), na = ""))
