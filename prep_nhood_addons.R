@@ -23,6 +23,13 @@ weights <- list(
       mutate(neighborhood = name)
   )
 
+pop15 <- tidycensus::get_acs("tract", variables = "B01003_001", year = 2015, state = "09")
+pop16 <- tidycensus::get_acs("tract", variables = "B01003_001", year = 2016, state = "09")
+pops <- list(`2015` = pop15, `2010-2015` = pop15, `2016` = pop16) %>%
+  bind_rows(.id = "year") %>%
+  select(year, tract = GEOID, pop = estimate)
+
+
 # cdc from socrata
 cdc_keep <- c("High blood pressure", "Current asthma", "Health insurance", "Diabetes", "Dental visit", "Current smoking", "Annual checkup", "Coronary heart disease", "Sleep <7 hours")
 
@@ -64,17 +71,19 @@ health <- cdc_df %>%
   select(tract, city, level, topic, indicator = question, value, type, format, year) %>%
   mutate(year = as.character(year)) %>%
   bind_rows(life_df) %>%
-  mutate(name = coalesce(tract, city))
+  mutate(name = coalesce(tract, city)) %>%
+  left_join(pops, by = c("tract", "year"))
 
 # get rid of clutter
 # rm(cdc_keep, cdc_query, cdc_url, cdc_df, life_df)
 
 
-
+# don't need population for cities--replacing these with 1
 all_city_health <- weights %>%
   left_join(health, by = c("name", "city")) %>% 
+  replace_na(list(pop = 1)) %>%
   group_by(city, level, year, topic, indicator, type, format, town, neighborhood) %>%
-  summarise(value = weighted.mean(value, weight, na.rm = T) %>% round(digits = 3)) %>% 
+  summarise(value = weighted.mean(value, weight * pop, na.rm = T) %>% round(digits = 3)) %>% 
   filter(!is.na(value)) %>%
   ungroup() %>%
   rename(geoType = level)
